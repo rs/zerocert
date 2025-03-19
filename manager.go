@@ -198,6 +198,7 @@ func (m *Manager) LoadOrRefresh() {
 // are hidden to the user of the listener.
 func (m *Manager) NewTLSListener(l net.Listener) net.Listener {
 	if l == nil {
+		l, _ = net.Listen("tcp", ":443")
 	}
 	_, port, _ := net.SplitHostPort(l.Addr().String())
 	m.cache = cache.Layered{

@@ -30,7 +30,7 @@ Given a domain `example.com` delegated to a list of hosts running the code below
 
 ```go
 m := zerocert.Manager{
-    Domains: []string{"*.example.com", "example.com"},
+    Domain: "example.com",
     Email: "user@exemple.com",
     Reg: "https://acme-v02.api.letsencrypt.org/acme/acct/1234",
     Key: []byte("-----BEGIN EC PRIVATE KEY-----
@@ -40,7 +40,7 @@ MHcCA...w==
 }
 
 d := dns.Server{
-    PacketConn: m.NewDNSListener(),
+    PacketConn: m.NewDNSListener(nil),
     Handler: ...
 }
 defer ds.Shutdown()
