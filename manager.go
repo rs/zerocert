@@ -232,7 +232,7 @@ func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 		if n2 := l.m.dns01Server.ServeDNS(b[:n], l.buf); n2 > 0 {
 			_, err = l.WriteTo(l.buf[:n2], addr)
 			if err != nil {
-				return n, addr, err
+				return 0, addr, err
 			}
 		} else {
 			return n, addr, nil
