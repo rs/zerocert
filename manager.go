@@ -228,6 +228,9 @@ func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 		if err != nil {
 			return n, addr, err
 		}
+		if n > len(b) {
+			return 0, addr, fmt.Errorf("buffer too small")
+		}
 
 		if n2 := l.m.dns01Server.ServeDNS(b[:n], l.buf); n2 > 0 {
 			_, err = l.WriteTo(l.buf[:n2], addr)
