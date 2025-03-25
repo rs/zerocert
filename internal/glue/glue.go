@@ -20,7 +20,8 @@ var rootServers = func() []string {
 func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
 	var cl dns.Client
 	var m dns.Msg
-	m.SetQuestion(dns.Fqdn(fqdn), dns.TypeA)
+	qname := dns.Fqdn(fqdn)
+	m.SetQuestion(qname, dns.TypeA)
 
 	// Start with the root nameservers
 	auths := rootServers
@@ -39,9 +40,13 @@ func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
 			return nil, err
 		}
 
+		nsEqQname := false
 		var newAuths []string
 		for _, ans := range response.Ns {
 			if ns, ok := ans.(*dns.NS); ok {
+				if ns.Header().Name == qname {
+					nsEqQname = true
+				}
 				resolved := false
 				for _, extra := range response.Extra {
 					if extra.Header().Name != ns.Ns {
@@ -59,6 +64,12 @@ func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
 					newAuths = append(newAuths, ns.Ns)
 				}
 			}
+		}
+
+		if nsEqQname {
+			// We have reached the authoritative nameserver for the FQDN
+			auths = newAuths
+			newAuths = newAuths[:0]
 		}
 
 		if len(newAuths) == 0 {
