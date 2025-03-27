@@ -1,13 +1,16 @@
 package tlsutil
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 )
@@ -66,15 +69,32 @@ func GenerateCertificate(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, doma
 
 	certBytes, err := x509.CreateCertificate(rand.Reader, &certTemplate, caCert, &caKey.PublicKey, caKey)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, fmt.Errorf("create certificate: %v", err)
 	}
 
 	keyBytes, err := x509.MarshalECPrivateKey(caKey)
 	if err != nil {
-		return tls.Certificate{}, err
+		return tls.Certificate{}, fmt.Errorf("marshal private key: %v", err)
 	}
 
-	return tls.X509KeyPair(certBytes, keyBytes)
+	var pemBuf bytes.Buffer
+
+	if err = pem.Encode(&pemBuf, &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: certBytes,
+	}); err != nil {
+		return tls.Certificate{}, fmt.Errorf("encode certificate: %v", err)
+	}
+
+	if err = pem.Encode(&pemBuf, &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: keyBytes,
+	}); err != nil {
+		return tls.Certificate{}, fmt.Errorf("encode private key: %v", err)
+	}
+
+	pemBytes := pemBuf.Bytes()
+	return tls.X509KeyPair(pemBytes, pemBytes)
 }
 
 func LatestCertificate(certs []*tls.Certificate) (*tls.Certificate, error) {

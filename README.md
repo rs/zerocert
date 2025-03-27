@@ -66,12 +66,16 @@ go func() {
     }
 }()
 
-m.LoadOrRefresh()
+if err := m.LoadOrRefresh(); err != nil {
+    log.Fatal(err)
+}
 
 for {
     select {
     case <-time.After(24 * time.Hour):
-        s.loadOrRefresh()
+        if err := s.loadOrRefresh(); err != nil {
+            log.Printf(err)
+        }
     }
 }
 ```

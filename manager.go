@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -147,11 +146,11 @@ func (m *Manager) init() error {
 	config.Certificate.KeyType = certcrypto.RSA2048
 	client, err := lego.NewClient(config)
 	if err != nil {
-		return err
+		return fmt.Errorf("create ACME client: %v", err)
 	}
 	err = client.Challenge.SetDNS01Provider(&m.dns01Provider)
 	if err != nil {
-		return err
+		return fmt.Errorf("set DNS01 provider: %v", err)
 	}
 	m.client = client
 	return nil
@@ -160,33 +159,37 @@ func (m *Manager) init() error {
 // LoadOrRefresh loads the certificate from the cache if it is not expired.
 // Otherwise, it obtains a new certificate from the ACME server and saves it to
 // the cache.
-func (m *Manager) LoadOrRefresh() {
+func (m *Manager) LoadOrRefresh() (err error) {
 	m.initOnce.Do(func() {
-		if err := m.init(); err != nil {
-			log.Printf("init: %v", err)
+		if err = m.init(); err != nil {
+			err = fmt.Errorf("init: %v", err)
 		}
 	})
-
-	if !m.needsRefresh() {
-		return
-	}
-
-	if err := m.loadCache(); err != nil {
-		log.Printf("loadCache: %v", err)
+	if err != nil {
+		return err
 	}
 
 	if !m.needsRefresh() {
 		return
 	}
 
-	if err := m.obtain(); err != nil {
-		log.Printf("Obtain: %v", err)
+	if err = m.loadCache(); err != nil {
+		return fmt.Errorf("loadCache: %v", err)
+	}
+
+	if !m.needsRefresh() {
 		return
+	}
+
+	if err = m.obtain(); err != nil {
+		return fmt.Errorf("obtain: %v", err)
 	}
 
 	if err := m.saveCache(); err != nil {
-		log.Printf("saveCache: %v", err)
+		return fmt.Errorf("saveCache: %v", err)
 	}
+
+	return nil
 }
 
 // NewTLSListener returns a new TLS listener that wraps l in order to provide a
