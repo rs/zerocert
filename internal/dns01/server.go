@@ -3,6 +3,7 @@ package dns01
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -30,11 +31,10 @@ func (s Server) ServeDNS(msg, wbuf []byte) []byte {
 	if err != nil {
 		return wbuf[:0]
 	}
-	if q.Type != dnsmessage.TypeTXT {
+	fqdn := q.Name.String()
+	if fqdn := q.Name.String(); !strings.HasPrefix(fqdn, "_acme-challenge.") {
 		return wbuf[:0]
 	}
-	fqdn := q.Name.String()
-
 	w := dnsmessage.NewBuilder(wbuf, dnsmessage.Header{
 		ID:               h.ID,
 		Response:         true,
@@ -58,18 +58,21 @@ func (s Server) ServeDNS(msg, wbuf []byte) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if challenges, found := s.Challenges(ctx, fqdn); found {
-		for _, c := range challenges {
-			if err := w.TXTResource(dnsmessage.ResourceHeader{
-				Name:   q.Name,
-				Type:   dnsmessage.TypeTXT,
-				Class:  dnsmessage.ClassINET,
-				TTL:    120,
-				Length: uint16(len(c)),
-			}, dnsmessage.TXTResource{
-				TXT: []string{c},
-			}); err != nil {
-				return wbuf[:0]
+	if q.Type == dnsmessage.TypeTXT {
+		if challenges, found := s.Challenges(ctx, fqdn); found {
+			log.Printf("DNS-01 challenge for %s: %v", fqdn, challenges)
+			for _, c := range challenges {
+				if err := w.TXTResource(dnsmessage.ResourceHeader{
+					Name:   q.Name,
+					Type:   dnsmessage.TypeTXT,
+					Class:  dnsmessage.ClassINET,
+					TTL:    120,
+					Length: uint16(len(c)),
+				}, dnsmessage.TXTResource{
+					TXT: []string{c},
+				}); err != nil {
+					return wbuf[:0]
+				}
 			}
 		}
 	}
@@ -82,7 +85,7 @@ func (s Server) Challenges(ctx context.Context, fqdn string) (challenges []strin
 	for _, c := range s {
 		cls, err := c.Challenge(ctx, fqdn)
 		if err != nil {
-			log.Printf("DNS-01 %T challenge: %v", cls, err)
+			log.Printf("DNS-01 %T challenge: %v", c, err)
 			continue
 		}
 		challenges = append(challenges, cls...)
