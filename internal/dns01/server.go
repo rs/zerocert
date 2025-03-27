@@ -14,24 +14,24 @@ type Challenger interface {
 
 type Server []Challenger
 
-// ServeDNS handles a msg DNS query and writes a DNS response to wbuf if the
-// query is a DNS-01 challenge query and returns the size of the response. If
-// the query is not a DNS-01 challenge, it returns 0.
-func (s Server) ServeDNS(msg, wbuf []byte) (n int) {
+// ServeDNS handles a msg DNS query and writes a DNS response to wbuf (if large
+// enough) if the query is a DNS-01 challenge query and returns the size of the
+// response. If the query is not a DNS-01 challenge, it returns 0.
+func (s Server) ServeDNS(msg, wbuf []byte) []byte {
 	var p dnsmessage.Parser
 	h, err := p.Start(msg)
 	if err != nil {
-		return 0
+		return wbuf[:0]
 	}
 	if h.Response {
-		return 0
+		return wbuf[:0]
 	}
 	q, err := p.Question()
 	if err != nil {
-		return 0
+		return wbuf[:0]
 	}
 	if q.Type != dnsmessage.TypeTXT {
-		return 0
+		return wbuf[:0]
 	}
 	fqdn := q.Name.String()
 
@@ -46,13 +46,13 @@ func (s Server) ServeDNS(msg, wbuf []byte) (n int) {
 	w.EnableCompression()
 
 	if err := w.StartQuestions(); err != nil {
-		return 0
+		return wbuf[:0]
 	}
 	if err := w.Question(q); err != nil {
-		return 0
+		return wbuf[:0]
 	}
 	if err := w.StartAnswers(); err != nil {
-		return 0
+		return wbuf[:0]
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -69,16 +69,13 @@ func (s Server) ServeDNS(msg, wbuf []byte) (n int) {
 			}, dnsmessage.TXTResource{
 				TXT: []string{c},
 			}); err != nil {
-				return 0
+				return wbuf[:0]
 			}
 		}
 	}
 
-	wbuf, err = w.Finish()
-	if err != nil {
-		return 0
-	}
-	return len(wbuf)
+	wbuf, _ = w.Finish()
+	return wbuf
 }
 
 func (s Server) Challenges(ctx context.Context, fqdn string) (challenges []string, found bool) {

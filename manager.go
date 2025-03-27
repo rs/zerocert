@@ -235,8 +235,8 @@ func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 			return 0, addr, fmt.Errorf("buffer too small")
 		}
 
-		if n2 := l.m.dns01Server.ServeDNS(b[:n], l.buf); n2 > 0 {
-			_, err = l.WriteTo(l.buf[:n2], addr)
+		if buf := l.m.dns01Server.ServeDNS(b[:n], l.buf); len(buf) > 0 {
+			_, err = l.WriteTo(buf, addr)
 			if err != nil {
 				return 0, addr, err
 			}
@@ -251,7 +251,7 @@ func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 // DNS-01 challenge. In that case, the listener responds with the challenge to
 // the client.
 func (m *Manager) NewDNSListener(pc net.PacketConn) net.PacketConn {
-	return dnsListener{pc, m, make([]byte, 512)}
+	return dnsListener{pc, m, make([]byte, 1500)}
 }
 
 func (m *Manager) loadCache() error {
