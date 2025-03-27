@@ -297,7 +297,7 @@ func (m *Manager) needsRefresh() bool {
 
 func (m *Manager) obtain() error {
 	request := certificate.ObtainRequest{
-		Domains: []string{"*" + m.Domain, m.Domain},
+		Domains: []string{"*." + m.Domain, m.Domain},
 		Bundle:  true,
 	}
 	res, err := m.client.Certificate.Obtain(request)
