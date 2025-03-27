@@ -13,7 +13,14 @@ import (
 type File string
 
 func (c File) Get(ctx context.Context) (*tls.Certificate, error) {
-	return tlsutil.ParseKeyPair(os.ReadFile(string(c)))
+	b, err := os.ReadFile(string(c))
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = nil
+		}
+		return nil, err
+	}
+	return tlsutil.ParseKeyPair(b, nil)
 }
 
 func (c File) Put(ctx context.Context, cert *tls.Certificate) error {
