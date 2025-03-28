@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -48,11 +49,19 @@ func (l *tlsListener) acceptLoop() {
 }
 
 func (l *tlsListener) handleConn(tc *tls.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in handleConn: %v\n%s", r, debug.Stack())
+			tc.Close()
+		}
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := tc.HandshakeContext(ctx); err != nil {
 		// Let upstream handle the handshake error.
+		log.Printf("cert request: handshake error: %v: %#v", err, tc.ConnectionState())
 		l.c <- connRes{tc, nil}
 		return
 	}
@@ -60,6 +69,7 @@ func (l *tlsListener) handleConn(tc *tls.Conn) {
 	state := tc.ConnectionState()
 	if state.ServerName != mTLSDomain || state.NegotiatedProtocol != tlsProto {
 		// Non-mTLS and non-zerocert proto connection are sent upstream.
+		log.Println("cert request: ", state.ServerName, state.NegotiatedProtocol)
 		l.c <- connRes{tc, nil}
 		return
 	}
@@ -73,6 +83,11 @@ func (l *tlsListener) handleConn(tc *tls.Conn) {
 	}
 
 	// Send cert/key pair encoded as PEM
+	if cert := l.m.GetCertificate(); cert == nil {
+		log.Println("cert request: no certificate")
+		return
+	}
+
 	b, err := tlsutil.EncodeKeyPair(l.m.GetCertificate())
 	if err != nil {
 		log.Printf("cert request: encoding: %v", err)

@@ -18,7 +18,7 @@ import (
 // GenerateDeterministicCA deterministically generates a CA certificate from
 // privateKey so the client and the server can perform an mTLS handshake with
 // only a private key shared.
-func GenerateDeterministicCA(privateKey *ecdsa.PrivateKey) (*x509.Certificate, []byte, error) {
+func GenerateDeterministicCA(privateKey *ecdsa.PrivateKey) (*x509.Certificate, error) {
 	// Generate a deterministic serial number from the private key
 	hashedKey := sha256.Sum256(privateKey.D.Bytes())
 	serialNumber := new(big.Int).SetBytes(hashedKey[:])
@@ -39,15 +39,15 @@ func GenerateDeterministicCA(privateKey *ecdsa.PrivateKey) (*x509.Certificate, [
 
 	caBytes, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &privateKey.PublicKey, privateKey)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	caCert, err := x509.ParseCertificate(caBytes)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	return caCert, caBytes, nil
+	return caCert, nil
 }
 
 // GenerateCertificate generates a client or server certificate signed by the
@@ -56,6 +56,7 @@ func GenerateCertificate(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, doma
 	certTemplate := x509.Certificate{
 		SerialNumber: big.NewInt(2), // Fixed serial for reproducibility
 		Subject:      pkix.Name{CommonName: domain},
+		DNSNames:     []string{domain},
 		NotBefore:    caCert.NotBefore,
 		NotAfter:     caCert.NotAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,

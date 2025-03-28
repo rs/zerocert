@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"log"
 
 	"github.com/rs/zerocert/internal/tlsutil"
 )
@@ -26,6 +27,9 @@ func (c Layered) Get(ctx context.Context) (*tls.Certificate, error) {
 	}
 	if len(certs) == 0 && len(errs) > 0 {
 		return nil, errors.Join(errs...)
+	}
+	if len(certs) == 0 {
+		log.Printf("cache fetch non-fatal error: %v", errs)
 	}
 	return tlsutil.LatestCertificate(certs)
 }

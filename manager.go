@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -55,7 +56,13 @@ type Manager struct {
 
 	client *lego.Client
 
-	initOnce sync.Once
+	glueClient glue.Client
+
+	initOnce             sync.Once
+	tlsListenerStartOnce sync.Once
+	tlsListenerStarted   chan struct{}
+	dnsListenerStartOnce sync.Once
+	dnsListenerStarted   chan struct{}
 
 	certMu sync.RWMutex
 	cert   *tls.Certificate
@@ -81,29 +88,33 @@ func (c legoConfig) GetPrivateKey() crypto.PrivateKey {
 }
 
 func (m *Manager) init() error {
+	m.tlsListenerStarted = make(chan struct{})
+	m.dnsListenerStarted = make(chan struct{})
+
 	privateKey, err := tlsutil.LoadECPrivateKey(m.Key)
 	if err != nil {
 		return fmt.Errorf("loading ACME key: %w", err)
 	}
-	caCert, caCertPEM, err := tlsutil.GenerateDeterministicCA(privateKey)
+	m.caCert, err = tlsutil.GenerateDeterministicCA(privateKey)
 	if err != nil {
 		return fmt.Errorf("generate CA: %w", err)
 	}
-	clientCert, err := tlsutil.GenerateCertificate(caCert, privateKey, mTLSDomain, false)
+	clientCert, err := tlsutil.GenerateCertificate(m.caCert, privateKey, mTLSDomain, false)
 	if err != nil {
 		return fmt.Errorf("generate client cert: %w", err)
 	}
-	serverCert, err := tlsutil.GenerateCertificate(caCert, privateKey, mTLSDomain, false)
+	serverCert, err := tlsutil.GenerateCertificate(m.caCert, privateKey, mTLSDomain, true)
 	if err != nil {
 		return fmt.Errorf("generate server cert: %w", err)
 	}
 	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCertPEM)
+	caCertPool.AddCert(m.caCert)
 
 	m.clientTLSConfig = &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
 		RootCAs:      caCertPool,
 		NextProtos:   []string{tlsProto},
+		ServerName:   mTLSDomain,
 	}
 
 	mtlsTLSConfig := &tls.Config{
@@ -136,10 +147,12 @@ func (m *Manager) init() error {
 	}
 
 	m.dns01Server = dns01.Server{
-		dns01.IPsChallenger{
-			GetIPs: glue.RetreiveIPs,
+		Zone:     m.Domain,
+		GetNSIPs: m.glueClient.RetreiveIPs,
+		DistributedChallenger: dns01.IPsChallenger{
+			GetIPs: m.glueClient.RetreiveIPs,
 		},
-		&m.dns01Provider,
+		LocalChallenger: &m.dns01Provider,
 	}
 
 	config := lego.NewConfig(legoConfig{m})
@@ -168,6 +181,8 @@ func (m *Manager) LoadOrRefresh() (err error) {
 	if err != nil {
 		return err
 	}
+	<-m.dnsListenerStarted
+	<-m.tlsListenerStarted
 
 	if !m.needsRefresh() {
 		return
@@ -178,6 +193,11 @@ func (m *Manager) LoadOrRefresh() (err error) {
 	}
 
 	if !m.needsRefresh() {
+		if err := m.saveCache(); err != nil {
+			// Save back to cache local cache in case we obtained the cert from
+			// a peer.
+			return fmt.Errorf("saveCache: %v", err)
+		}
 		return
 	}
 
@@ -200,6 +220,15 @@ func (m *Manager) LoadOrRefresh() (err error) {
 // of the same cluster to share the certificate and key. Those connections are
 // are hidden to the user of the listener.
 func (m *Manager) NewTLSListener(l net.Listener) net.Listener {
+	m.initOnce.Do(func() {
+		if err := m.init(); err != nil {
+			log.Fatalf("init: %v", err)
+		}
+	})
+	m.tlsListenerStartOnce.Do(func() {
+		close(m.tlsListenerStarted)
+	})
+
 	if l == nil {
 		l, _ = net.Listen("tcp", ":443")
 	}
@@ -208,7 +237,7 @@ func (m *Manager) NewTLSListener(l net.Listener) net.Listener {
 		cache.TLS{
 			Port: port,
 			GetIPs: func(ctx context.Context) ([]net.IP, error) {
-				return glue.RetreiveIPs(ctx, m.Domain)
+				return m.glueClient.RetreiveIPs(ctx, m.Domain)
 			},
 			TLSDialer: &tls.Dialer{
 				Config: m.clientTLSConfig,
@@ -225,6 +254,15 @@ type dnsListener struct {
 	buf []byte
 }
 
+type writerTo struct {
+	w net.PacketConn
+	a net.Addr
+}
+
+func (w writerTo) Write(b []byte) (int, error) {
+	return w.w.WriteTo(b, w.a)
+}
+
 func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 	for {
 		n, addr, err := l.PacketConn.ReadFrom(b)
@@ -235,12 +273,7 @@ func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 			return 0, addr, fmt.Errorf("buffer too small")
 		}
 
-		if buf := l.m.dns01Server.ServeDNS(b[:n], l.buf); len(buf) > 0 {
-			_, err = l.WriteTo(buf, addr)
-			if err != nil {
-				return 0, addr, err
-			}
-		} else {
+		if !l.m.dns01Server.ServeDNS(b[:n], writerTo{l, addr}) {
 			return n, addr, nil
 		}
 	}
@@ -251,7 +284,15 @@ func (l dnsListener) ReadFrom(b []byte) (int, net.Addr, error) {
 // DNS-01 challenge. In that case, the listener responds with the challenge to
 // the client.
 func (m *Manager) NewDNSListener(pc net.PacketConn) net.PacketConn {
-	return dnsListener{pc, m, make([]byte, 1500)}
+	m.initOnce.Do(func() {
+		if err := m.init(); err != nil {
+			log.Fatalf("init: %v", err)
+		}
+	})
+	m.dnsListenerStartOnce.Do(func() {
+		close(m.dnsListenerStarted)
+	})
+	return dnsListener{pc, m, make([]byte, 0, 1500)}
 }
 
 func (m *Manager) loadCache() error {
@@ -263,6 +304,8 @@ func (m *Manager) loadCache() error {
 	if err != nil {
 		return err
 	}
+
+	log.Println("loaded certificate from cache")
 
 	m.certMu.Lock()
 	defer m.certMu.Unlock()

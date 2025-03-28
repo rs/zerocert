@@ -3,6 +3,8 @@ package glue
 import (
 	"context"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -15,9 +17,51 @@ var rootServers = func() []string {
 	return servers
 }()
 
+type Client struct {
+	mu    sync.RWMutex
+	cache map[string]cacheEntry
+}
+
+type cacheEntry struct {
+	ips        []net.IP
+	validUntil time.Time
+}
+
+func (c *Client) getCached(fqdn string) ([]net.IP, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, found := c.cache[fqdn]
+	if !found {
+		return nil, false
+	}
+	if e.validUntil.After(time.Now()) {
+		return e.ips, true
+	}
+	return nil, false
+}
+
+func (c *Client) saveCache(fqdn string, ips []net.IP, ttl uint32) {
+	if ttl < 30 {
+		ttl = 30
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]cacheEntry)
+	}
+	c.cache[fqdn] = cacheEntry{
+		ips:        ips,
+		validUntil: time.Now().Add(time.Duration(ttl) * time.Second),
+	}
+}
+
 // RetreiveIPs returns the glue IP addresses for given FQDN by performing a
 // manual recursion.
-func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
+func (c *Client) RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
+	ips, ok := c.getCached(fqdn)
+	if ok {
+		return ips, nil
+	}
 	var cl dns.Client
 	var m dns.Msg
 	qname := dns.Fqdn(fqdn)
@@ -40,6 +84,7 @@ func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
 			return nil, err
 		}
 
+		var minTTL uint32
 		nsEqQname := false
 		var newAuths []string
 		for _, ans := range response.Ns {
@@ -58,6 +103,9 @@ func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
 					} else if aaaa, ok := extra.(*dns.AAAA); ok {
 						newAuths = append(newAuths, aaaa.AAAA.String())
 						resolved = true
+					}
+					if ttl := extra.Header().Header().Ttl; ttl > minTTL {
+						minTTL = ttl
 					}
 				}
 				if !resolved {
@@ -80,6 +128,7 @@ func RetreiveIPs(ctx context.Context, fqdn string) ([]net.IP, error) {
 					glues = append(glues, ip)
 				}
 			}
+			c.saveCache(fqdn, glues, minTTL)
 			return glues, nil
 		}
 

@@ -2,10 +2,13 @@ package dns01
 
 import (
 	"context"
+	"io"
 	"log"
+	"net"
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -13,29 +16,116 @@ type Challenger interface {
 	Challenge(ctx context.Context, fqdn string) ([]string, error)
 }
 
-type Server []Challenger
+type Server struct {
+	Zone                  string
+	GetNSIPs              func(ctx context.Context, fqdn string) ([]net.IP, error)
+	DistributedChallenger Challenger
+	LocalChallenger       Challenger
+}
 
-// ServeDNS handles a msg DNS query and writes a DNS response to wbuf (if large
-// enough) if the query is a DNS-01 challenge query and returns the size of the
-// response. If the query is not a DNS-01 challenge, it returns 0.
-func (s Server) ServeDNS(msg, wbuf []byte) []byte {
+// ServeDNS handles a msg DNS query and writes a DNS response to w if the query
+// is a DNS-01 challenge query and returns true. If the query is not a DNS-01
+// challenge, it returns false.
+func (s Server) ServeDNS(msg []byte, w io.Writer) bool {
 	var p dnsmessage.Parser
 	h, err := p.Start(msg)
 	if err != nil {
-		return wbuf[:0]
+		return false
 	}
 	if h.Response {
-		return wbuf[:0]
+		return false
 	}
 	q, err := p.Question()
 	if err != nil {
-		return wbuf[:0]
+		return false
 	}
-	fqdn := q.Name.String()
-	if fqdn := q.Name.String(); !strings.HasPrefix(fqdn, "_acme-challenge.") {
-		return wbuf[:0]
+	fqdn := strings.ToLower(q.Name.String())
+	if q.Type == dnsmessage.TypeSOA && dns.Fqdn(s.Zone) == dns.Fqdn(q.Name.String()) {
+		writeSOA(w, h, q)
+		return true
 	}
-	w := dnsmessage.NewBuilder(wbuf, dnsmessage.Header{
+	if !strings.HasPrefix(fqdn, "_acme-challenge.") && !strings.HasPrefix(fqdn, "_local_acme-challenge.") {
+		return false
+	}
+
+	go s.handleChanlenge(h, q, w)
+	return true
+}
+
+func (s Server) handleChanlenge(h dnsmessage.Header, q dnsmessage.Question, w io.Writer) {
+	fqdn := strings.ToLower(q.Name.String())
+	challenge := fqdn
+	var c Challenger
+	if strings.HasPrefix(fqdn, "_acme-challenge.") {
+		c = s.DistributedChallenger
+		challenge = "_local" + challenge
+	} else if strings.HasPrefix(fqdn, "_local_acme-challenge.") {
+		c = s.LocalChallenger
+		challenge = strings.TrimPrefix(challenge, "_local")
+	} else {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var challenges []string
+	if q.Type == dnsmessage.TypeTXT && c != nil {
+		var err error
+		if challenges, err = c.Challenge(ctx, challenge); err != nil {
+			log.Printf("Error getting challenges for %s: %v", fqdn, err)
+		}
+	}
+	log.Printf("DNS-01 %s %s: %v", strings.TrimPrefix(q.Type.String(), "Type"), fqdn, challenges)
+
+	rcode := dnsmessage.RCodeNameError
+	if len(challenges) > 0 {
+		rcode = dnsmessage.RCodeSuccess
+	}
+
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+		ID:               h.ID,
+		Response:         true,
+		Authoritative:    true,
+		CheckingDisabled: h.CheckingDisabled,
+		RecursionDesired: h.RecursionDesired,
+		RCode:            rcode,
+	})
+	b.EnableCompression()
+
+	if err := b.StartQuestions(); err != nil {
+		return
+	}
+	if err := b.Question(q); err != nil {
+		return
+	}
+	if err := b.StartAnswers(); err != nil {
+		return
+	}
+
+	for _, txt := range challenges {
+		_ = b.TXTResource(dnsmessage.ResourceHeader{
+			Name:   q.Name,
+			Type:   dnsmessage.TypeTXT,
+			Class:  dnsmessage.ClassINET,
+			TTL:    60,
+			Length: uint16(len(txt)),
+		}, dnsmessage.TXTResource{
+			TXT: []string{txt},
+		})
+	}
+
+	wbuf, err := b.Finish()
+	if err != nil {
+		return
+	}
+	if _, err := w.Write(wbuf); err != nil {
+		return
+	}
+}
+
+func writeSOA(w io.Writer, h dnsmessage.Header, q dnsmessage.Question) {
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{
 		ID:               h.ID,
 		Response:         true,
 		Authoritative:    true,
@@ -43,53 +133,43 @@ func (s Server) ServeDNS(msg, wbuf []byte) []byte {
 		RecursionDesired: h.RecursionDesired,
 		RCode:            dnsmessage.RCodeSuccess,
 	})
-	w.EnableCompression()
+	b.EnableCompression()
 
-	if err := w.StartQuestions(); err != nil {
-		return wbuf[:0]
+	if err := b.StartQuestions(); err != nil {
+		return
 	}
-	if err := w.Question(q); err != nil {
-		return wbuf[:0]
+	if err := b.Question(q); err != nil {
+		return
 	}
-	if err := w.StartAnswers(); err != nil {
-		return wbuf[:0]
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if q.Type == dnsmessage.TypeTXT {
-		if challenges, found := s.Challenges(ctx, fqdn); found {
-			log.Printf("DNS-01 challenge for %s: %v", fqdn, challenges)
-			for _, c := range challenges {
-				if err := w.TXTResource(dnsmessage.ResourceHeader{
-					Name:   q.Name,
-					Type:   dnsmessage.TypeTXT,
-					Class:  dnsmessage.ClassINET,
-					TTL:    120,
-					Length: uint16(len(c)),
-				}, dnsmessage.TXTResource{
-					TXT: []string{c},
-				}); err != nil {
-					return wbuf[:0]
-				}
-			}
-		}
+	if err := b.StartAnswers(); err != nil {
+		return
 	}
 
-	wbuf, _ = w.Finish()
-	return wbuf
-}
-
-func (s Server) Challenges(ctx context.Context, fqdn string) (challenges []string, found bool) {
-	for _, c := range s {
-		cls, err := c.Challenge(ctx, fqdn)
-		if err != nil {
-			log.Printf("DNS-01 %T challenge: %v", c, err)
-			continue
-		}
-		challenges = append(challenges, cls...)
-		found = true
+	nsName, err := dnsmessage.NewName("ns." + q.Name.String())
+	if err != nil {
+		return
 	}
-	return challenges, found
+	if err := b.SOAResource(dnsmessage.ResourceHeader{
+		Name:  q.Name,
+		Type:  dnsmessage.TypeSOA,
+		Class: dnsmessage.ClassINET,
+		TTL:   300,
+	}, dnsmessage.SOAResource{
+		NS:      nsName,
+		MBox:    nsName,
+		Refresh: 1200,
+		Retry:   300,
+		Expire:  1209600,
+		MinTTL:  300,
+	}); err != nil {
+		return
+	}
+
+	wbuf, err := b.Finish()
+	if err != nil {
+		return
+	}
+	if _, err := w.Write(wbuf); err != nil {
+		return
+	}
 }

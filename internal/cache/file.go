@@ -28,7 +28,7 @@ func (c File) Put(ctx context.Context, cert *tls.Certificate) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Base(string(c)), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(string(c)), 0700); err != nil {
 		return err
 	}
 	return os.WriteFile(string(c), pem, 0600)
