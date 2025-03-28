@@ -61,7 +61,6 @@ func (l *tlsListener) handleConn(tc *tls.Conn) {
 
 	if err := tc.HandshakeContext(ctx); err != nil {
 		// Let upstream handle the handshake error.
-		log.Printf("cert request: handshake error: %v: %#v", err, tc.ConnectionState())
 		l.c <- connRes{tc, nil}
 		return
 	}
