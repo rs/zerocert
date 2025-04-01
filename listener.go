@@ -68,7 +68,6 @@ func (l *tlsListener) handleConn(tc *tls.Conn) {
 	state := tc.ConnectionState()
 	if state.ServerName != mTLSDomain || state.NegotiatedProtocol != tlsProto {
 		// Non-mTLS and non-zerocert proto connection are sent upstream.
-		log.Println("cert request: ", state.ServerName, state.NegotiatedProtocol)
 		l.c <- connRes{tc, nil}
 		return
 	}
